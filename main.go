@@ -22,6 +22,7 @@ func agentLoop(messages *[]openai.ChatCompletionMessage) {
 		if compact.EstimateTokens(messages) > common.THRESHOLD {
 			compact.Auto_compact(messages)
 		}
+		tools.Notify(messages)
 		req := openai.ChatCompletionRequest{
 			Model:       common.ModelID,
 			Messages:    *messages,

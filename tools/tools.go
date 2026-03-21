@@ -378,8 +378,26 @@ func GetALLTools() []openai.Tool {
 
 var todoManager = NewTodoManager()
 var taskManager, _ = NewTaskManager(common.TASKS_DIR) //todos:错误的处理
+var bgManager = NewBackgroundManager()
 
-// todos: 等待完善真正并行的sub_agent
+func Notify(messages *[]openai.ChatCompletionMessage) {
+	notifs := bgManager.DrainNotifications()
+	if len(notifs) > 0 {
+		b, _ := json.MarshalIndent(notifs, "", "  ")
+		sysEventMsg := fmt.Sprintf("<background_notifications>\n%s\n</background_notifications>\nReview these completed tasks and update your plans accordingly.", string(b))
+
+		// 将通知伪装成 User 消息注入对话历史，强迫模型处理
+		*messages = append(*messages, openai.ChatCompletionMessage{
+			Role:    openai.ChatMessageRoleUser,
+			Content: sysEventMsg,
+		})
+		fmt.Printf("\n[!] Injected %d background task notifications.\n", len(notifs))
+	}
+}
+
+// todos:
+// 1.等待完善真正并行的sub_agent
+// 2. 等待完成工具注册接口
 func HandleToolCall(call openai.ToolCall, usedtodo *bool) string {
 	var args map[string]interface{}
 	json.Unmarshal([]byte(call.Function.Arguments), &args)
@@ -444,6 +462,15 @@ func HandleToolCall(call openai.ToolCall, usedtodo *bool) string {
 		output = taskManager.Update(taskID, status, blockedBy, blocks)
 	case "list_tasks":
 		output = taskManager.ListAll()
+	case "run_background":
+		output = bgManager.Run(args["command"].(string))
+
+	case "check_background":
+		taskID := ""
+		if tid, ok := args["task_id"].(string); ok {
+			taskID = tid
+		}
+		output = bgManager.Check(taskID)
 	default:
 		output = fmt.Sprintf("Unknown tool: %s", call.Function.Name)
 	}
