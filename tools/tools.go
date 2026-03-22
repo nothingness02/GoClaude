@@ -17,6 +17,11 @@ import (
 	"github.com/sashabaranov/go-openai/jsonschema"
 )
 
+//todos:
+//1.添加工具的动态注册
+//2.添加skill的动态卸载和注册
+//3.消化MCP服务
+
 func safePath(p string) (string, error) {
 	target := filepath.Join(common.WorkDir, p)
 	target = filepath.Clean(target)
@@ -366,6 +371,97 @@ var parent_tools = append(base_tools,
 			},
 		},
 	},
+	openai.Tool{
+		Type: openai.ToolTypeFunction,
+		Function: &openai.FunctionDefinition{
+			Name:        "spawn_teammate",
+			Description: "Spawn a persistent teammate agent running in the background.",
+			Parameters: jsonschema.Definition{
+				Type: jsonschema.Object,
+				Properties: map[string]jsonschema.Definition{
+					"name":   {Type: jsonschema.String},
+					"role":   {Type: jsonschema.String},
+					"prompt": {Type: jsonschema.String, Description: "Initial instructions for the teammate."},
+				},
+				Required: []string{"name", "role", "prompt"},
+			},
+		},
+	},
+	openai.Tool{
+		Type: openai.ToolTypeFunction,
+		Function: &openai.FunctionDefinition{
+			Name:        "list_teammates",
+			Description: "List all teammates and their statuses.",
+			Parameters:  jsonschema.Definition{Type: jsonschema.Object},
+		},
+	},
+	openai.Tool{
+		Type: openai.ToolTypeFunction,
+		Function: &openai.FunctionDefinition{
+			Name:        "send_message",
+			Description: "Send message to a teammate.",
+			Parameters: jsonschema.Definition{
+				Type: jsonschema.Object,
+				Properties: map[string]jsonschema.Definition{
+					"to":       {Type: jsonschema.String},
+					"content":  {Type: jsonschema.String},
+					"msg_type": {Type: jsonschema.String, Enum: []string{"message", "broadcast"}},
+				},
+				Required: []string{"to", "content"},
+			},
+		},
+	},
+	openai.Tool{
+		Type: openai.ToolTypeFunction,
+		Function: &openai.FunctionDefinition{
+			Name:        "read_inbox",
+			Description: "Read and drain your inbox.",
+			Parameters:  jsonschema.Definition{Type: jsonschema.Object},
+		},
+	},
+	openai.Tool{
+		Type: openai.ToolTypeFunction,
+		Function: &openai.FunctionDefinition{
+			Name:        "request_shutdown",
+			Description: "Send a graceful shutdown request to a teammate.",
+			Parameters: jsonschema.Definition{
+				Type: jsonschema.Object,
+				Properties: map[string]jsonschema.Definition{
+					"teammate": {Type: jsonschema.String},
+				},
+				Required: []string{"teammate"},
+			},
+		},
+	}, openai.Tool{
+		Type: openai.ToolTypeFunction,
+		Function: &openai.FunctionDefinition{
+			Name:        "review_plan",
+			Description: "Approve or reject a teammate's submitted plan.",
+			Parameters: jsonschema.Definition{
+				Type: jsonschema.Object,
+				Properties: map[string]jsonschema.Definition{
+					"request_id": {Type: jsonschema.String},
+					"approve":    {Type: jsonschema.Boolean},
+					"feedback":   {Type: jsonschema.String},
+				},
+				Required: []string{"request_id", "approve"},
+			},
+		},
+	},
+	openai.Tool{
+		Type: openai.ToolTypeFunction,
+		Function: &openai.FunctionDefinition{
+			Name:        "check_shutdown_status",
+			Description: "Check the status of a previously sent shutdown request.",
+			Parameters: jsonschema.Definition{
+				Type: jsonschema.Object,
+				Properties: map[string]jsonschema.Definition{
+					"request_id": {Type: jsonschema.String},
+				},
+				Required: []string{"request_id"},
+			},
+		},
+	},
 )
 
 func GetBaseTools() []openai.Tool {
@@ -379,6 +475,8 @@ func GetALLTools() []openai.Tool {
 var todoManager = NewTodoManager()
 var taskManager, _ = NewTaskManager(common.TASKS_DIR) //todos:错误的处理
 var bgManager = NewBackgroundManager()
+var msgBus, _ = NewMessageBus(common.INBOX_DIR)
+var teamManager = NewTeammateManager(common.TEAM_DIR, msgBus)
 
 func Notify(messages *[]openai.ChatCompletionMessage) {
 	notifs := bgManager.DrainNotifications()
@@ -471,6 +569,30 @@ func HandleToolCall(call openai.ToolCall, usedtodo *bool) string {
 			taskID = tid
 		}
 		output = bgManager.Check(taskID)
+	case "send_message":
+		msgType := "message"
+		if t, ok := args["msg_type"].(string); ok {
+			msgType = t
+		}
+		output = teamManager.bus.Send("lead", args["to"].(string), args["content"].(string), msgType, nil)
+	case "read_inbox":
+		msgs := teamManager.bus.ReadInbox("lead")
+		data, _ := json.MarshalIndent(msgs, "", "  ")
+		output = string(data)
+	case "list_teammates":
+		output = teamManager.ListAll()
+	case "spawn_teammate":
+		output = teamManager.Spawn(args["name"].(string), args["role"].(string), args["prompt"].(string))
+	case "request_shutdown":
+		output = HandleShutdownRequest(args["teammate"].(string), msgBus)
+	case "review_plan":
+		feedback := ""
+		if f, ok := args["feedback"].(string); ok {
+			feedback = f
+		}
+		output = HandlePlanReview(args["request_id"].(string), args["approve"].(bool), feedback, msgBus)
+	case "check_shutdown_status":
+		output = CheckShutdownStatus(args["request_id"].(string))
 	default:
 		output = fmt.Sprintf("Unknown tool: %s", call.Function.Name)
 	}

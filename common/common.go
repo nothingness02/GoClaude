@@ -18,6 +18,8 @@ var (
 	TASKS_DIR      string
 	Keep_RECENT    int
 	THRESHOLD      int
+	TEAM_DIR       string
+	INBOX_DIR      string
 )
 
 func init() {
@@ -40,6 +42,8 @@ func init() {
 	SkillsDir = filepath.Join(WorkDir, "skills")
 	TRANSCRIPT_DIR = filepath.Join(WorkDir, "transcripts")
 	TASKS_DIR = filepath.Join(WorkDir, "tasks")
+	TEAM_DIR = filepath.Join(WorkDir, "team")
+	INBOX_DIR = filepath.Join(TEAM_DIR, "inbox")
 	Keep_RECENT = 3
 	THRESHOLD = 80000
 }

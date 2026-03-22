@@ -1,5 +1,8 @@
 package main
 
+//todos:
+// 优化交互界面.对外提供网络接口
+// 提供除文字外更多有确定性的交互接口
 import (
 	"bufio"
 	"context"
