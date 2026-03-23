@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/GoClaude/common"
 	"github.com/sashabaranov/go-openai"
@@ -105,6 +106,28 @@ var teammateTools = []openai.Tool{
 			},
 		},
 	},
+	{
+		Type: openai.ToolTypeFunction,
+		Function: &openai.FunctionDefinition{
+			Name:        "idle",
+			Description: "Signal that you have no more work. Enters idle polling phase to look for new tasks.",
+			Parameters:  jsonschema.Definition{Type: jsonschema.Object},
+		},
+	},
+	{
+		Type: openai.ToolTypeFunction,
+		Function: &openai.FunctionDefinition{
+			Name:        "claim_task",
+			Description: "Claim a task from the task board by ID.",
+			Parameters: jsonschema.Definition{
+				Type: jsonschema.Object,
+				Properties: map[string]jsonschema.Definition{
+					"task_id": {Type: jsonschema.Integer},
+				},
+				Required: []string{"task_id"},
+			},
+		},
+	},
 }
 
 // --------------------核心逻辑 --------------—-
@@ -131,132 +154,173 @@ func (tm *TeammateManager) Spawn(name, role, prompt string) string {
 
 }
 
+func makeIdentityBlock(name, role string) openai.ChatCompletionMessage {
+	return openai.ChatCompletionMessage{
+		Role:    role,
+		Content: fmt.Sprintf("<identity>You are '%s', role: %s. Continue your work.</identity>", name, role),
+	}
+}
+
 func (tm *TeammateManager) teammateLoop(name, role, prompt string) {
 	sysPrompt := fmt.Sprintf(
 		"You are '%s', role: %s, at %s. Use send_message to communicate. "+
 			"Submit plans via plan_approval before major work. "+
 			"Respond to shutdown_request with shutdown_response.",
 		name, role, common.WorkDir)
-	shouldExit := false
 	messages := []openai.ChatCompletionMessage{
 		{Role: openai.ChatMessageRoleSystem, Content: sysPrompt},
 		{Role: openai.ChatMessageRoleUser, Content: prompt},
 	}
-	for i := 0; i < 50; i++ {
-		if shouldExit {
-			break // 检测到同意退出，平滑终止 Goroutine
-		}
-		inbox := tm.bus.ReadInbox(name)
-		for _, msg := range inbox {
-			msgData, _ := json.Marshal(msg)
-			messages = append(messages, openai.ChatCompletionMessage{
-				Role:    openai.ChatMessageRoleUser,
-				Content: fmt.Sprintf("<incoming_message>\n%s\n</incoming_message>", string(msgData)),
-			})
-		}
-		req := openai.ChatCompletionRequest{
-			Model:       common.ModelID,
-			Messages:    messages,
-			Tools:       teammateTools,
-			MaxTokens:   4000,
-			Temperature: 0.2,
-		}
-		ctx := context.Background()
-		resp, err := common.Client.CreateChatCompletion(ctx, req)
-		if err != nil {
-			fmt.Printf("Teammate [%s] API Error: %v\n", name, err)
-			break
-		}
-		respMsg := resp.Choices[0].Message
-		messages = append(messages, respMsg)
-		if len(respMsg.ToolCalls) == 0 {
-			break // 任务完成或没有调用工具
-		}
-		for _, toolCall := range respMsg.ToolCalls {
-			var args map[string]interface{}
-			json.Unmarshal([]byte(toolCall.Function.Arguments), &args)
+	for {
+		// ==========================================
+		// WORK PHASE (工作模式)
+		// ==========================================
+		idleRequested := false
+		for i := 0; i < 50; i++ {
+			inbox := tm.bus.ReadInbox(name)
+			for _, msg := range inbox {
+				msgData, _ := json.Marshal(msg)
+				if msg.Type == "shutdown_request" {
+					tm.setStatus(name, "shutdown")
+					return // 强制下线
+				}
+				messages = append(messages, openai.ChatCompletionMessage{
+					Role:    openai.ChatMessageRoleUser,
+					Content: fmt.Sprintf("<incoming_message>\n%s\n</incoming_message>", string(msgData)),
+				})
+			}
+			req := openai.ChatCompletionRequest{
+				Model:       common.ModelID,
+				Messages:    messages,
+				Tools:       teammateTools,
+				MaxTokens:   4000,
+				Temperature: 0.2,
+			}
+			ctx := context.Background()
+			resp, err := common.Client.CreateChatCompletion(ctx, req)
+			if err != nil {
+				tm.setStatus(name, "idle")
+				return
+			}
+			respMsg := resp.Choices[0].Message
+			messages = append(messages, respMsg)
+			if len(respMsg.ToolCalls) == 0 {
+				break // 任务完成或没有调用工具
+			}
+			for _, toolCall := range respMsg.ToolCalls {
+				var args map[string]interface{}
+				json.Unmarshal([]byte(toolCall.Function.Arguments), &args)
 
-			var output string
-			switch toolCall.Function.Name {
-			case "bash":
-				output = runBash(args["command"].(string))
-			case "read_file":
-				output = runRead(args["path"].(string), 0)
-			case "write_file":
-				output = runWrite(args["path"].(string), args["content"].(string))
-			case "edit_file":
-				output = runEdit(args["path"].(string), args["old_text"].(string), args["new_text"].(string))
-			case "send_message":
-				msgType := "message"
-				if t, ok := args["msg_type"].(string); ok {
-					msgType = t
-				}
-				output = tm.bus.Send(name, args["to"].(string), args["content"].(string), msgType, nil)
-			case "read_inbox":
-				msgs := tm.bus.ReadInbox(name)
-				data, _ := json.MarshalIndent(msgs, "", "  ")
-				output = string(data)
-			case "shutdown_response":
-				reqID := args["request_id"].(string)
-				approve := args["approve"].(bool)
-				reason := ""
-				if r, ok := args["reason"].(string); ok {
-					reason = r
-				}
-				trackerMu.Lock()
-				if req, exists := shutdownRequests[reqID]; exists {
-					if approve {
-						req.Status = "approved"
-					} else {
-						req.Status = "rejected"
+				var output string
+				switch toolCall.Function.Name {
+				case "bash":
+					output = runBash(args["command"].(string))
+				case "read_file":
+					output = runRead(args["path"].(string), 0)
+				case "write_file":
+					output = runWrite(args["path"].(string), args["content"].(string))
+				case "edit_file":
+					output = runEdit(args["path"].(string), args["old_text"].(string), args["new_text"].(string))
+				case "send_message":
+					msgType := "message"
+					if t, ok := args["msg_type"].(string); ok {
+						msgType = t
 					}
+					output = tm.bus.Send(name, args["to"].(string), args["content"].(string), msgType, nil)
+				case "read_inbox":
+					msgs := tm.bus.ReadInbox(name)
+					data, _ := json.MarshalIndent(msgs, "", "  ")
+					output = string(data)
+				case "plan_approval":
+					planText := args["plan"].(string)
+					reqID := shortID()
+
+					trackerMu.Lock()
+					planRequests[reqID] = &PlanReq{From: name, Plan: planText, Status: "pending"}
+					trackerMu.Unlock()
+
+					extra := map[string]interface{}{"request_id": reqID, "plan": planText}
+					tm.bus.Send(name, "lead", planText, "plan_approval_request", extra)
+
+					output = fmt.Sprintf("Plan submitted (request_id=%s). Waiting for lead approval via inbox.", reqID)
+				case "claim_task":
+					taskID := int(args["task_id"].(float64))
+					output = taskManager.Claim(taskID, name)
+
+				case "idle":
+					idleRequested = true
+					output = "Entering idle phase. Will poll for new tasks."
+				default:
+					output = fmt.Sprintf("Unknown tool: %s", toolCall.Function.Name)
 				}
-				trackerMu.Unlock()
-				extra := map[string]interface{}{"request_id": reqID, "approve": approve}
-				tm.bus.Send(name, "lead", reason, "shutdown_response", extra)
-				if approve {
-					shouldExit = true
-					output = "Shutdown approved. Preparing to exit."
-				} else {
-					output = "Shutdown rejected. Continuing work."
+				preview := output
+				if len(preview) > 120 {
+					preview = preview[:120] + "..."
 				}
-			case "plan_approval":
-				planText := args["plan"].(string)
-				reqID := shortID()
-
-				trackerMu.Lock()
-				planRequests[reqID] = &PlanReq{From: name, Plan: planText, Status: "pending"}
-				trackerMu.Unlock()
-
-				extra := map[string]interface{}{"request_id": reqID, "plan": planText}
-				tm.bus.Send(name, "lead", planText, "plan_approval_request", extra)
-
-				output = fmt.Sprintf("Plan submitted (request_id=%s). Waiting for lead approval via inbox.", reqID)
-			default:
-				output = fmt.Sprintf("Unknown tool: %s", toolCall.Function.Name)
+				fmt.Printf("  [%s] %s: %s\n", name, toolCall.Function.Name, strings.ReplaceAll(preview, "\n", " "))
+				messages = append(messages, openai.ChatCompletionMessage{
+					Role:       openai.ChatMessageRoleTool,
+					Content:    output,
+					ToolCallID: toolCall.ID,
+				})
 			}
-			preview := output
-			if len(preview) > 120 {
-				preview = preview[:120] + "..."
+			if idleRequested {
+				break // 退出工作循环，进入摸鱼/轮询循环
 			}
-			fmt.Printf("  [%s] %s: %s\n", name, toolCall.Function.Name, strings.ReplaceAll(preview, "\n", " "))
-			messages = append(messages, openai.ChatCompletionMessage{
-				Role:       openai.ChatMessageRoleTool,
-				Content:    output,
-				ToolCallID: toolCall.ID,
-			})
 		}
-	}
-	tm.mu.Lock()
-	if member := tm.findMember(name); member != nil {
-		if shouldExit {
-			member.Status = "shutdown"
-		} else if member.Status != "shutdown" {
-			member.Status = "idle"
+		// ==========================================
+		// IDLE PHASE (闲置轮询模式)
+		// ==========================================
+		tm.setStatus(name, "idle")
+		resumeWork := false
+		fmt.Printf("[System] %s entered IDLE state.\n", name)
+		for polls := 0; polls < 12; polls++ {
+			time.Sleep(5 * time.Second)
+			// 检查收件箱
+			inbox := tm.bus.ReadInbox(name)
+			if len(inbox) > 0 {
+				for _, msg := range inbox {
+					if msg.Type == "shutdown_request" {
+						tm.setStatus(name, "shutdown")
+						return
+					}
+					msgData, _ := json.Marshal(msg)
+					messages = append(messages, openai.ChatCompletionMessage{
+						Role: openai.ChatMessageRoleUser, Content: string(msgData),
+					})
+				}
+				resumeWork = true
+				break
+			}
+			// B. 去任务看板看看有没有能做的活儿
+			unclaimedTasks := taskManager.ScanUnclaimed()
+			if len(unclaimedTasks) > 0 {
+				task := unclaimedTasks[0]
+				taskManager.Claim(task.ID, name)
+
+				taskPrompt := fmt.Sprintf("<auto-claimed>Task #%d: %s\n%s</auto-claimed>", task.ID, task.Subject, task.Description)
+
+				// 身份重塑：防止上下文过长导致遗忘
+				if len(messages) <= 3 { // 如果被自动压缩过，塞入强身份
+					messages = append([]openai.ChatCompletionMessage{makeIdentityBlock(name, role)}, messages...)
+				}
+
+				messages = append(messages, openai.ChatCompletionMessage{
+					Role: openai.ChatMessageRoleUser, Content: taskPrompt,
+				})
+
+				fmt.Printf("=> [Autonomy] %s automatically claimed Task #%d\n", name, task.ID)
+				resumeWork = true
+				break
+			}
 		}
+		if !resumeWork {
+			fmt.Printf("[System] %s timed out. Shutting down.\n", name)
+			tm.setStatus(name, "shutdown")
+			return
+		}
+		tm.setStatus(name, "working")
 	}
-	tm.saveConfig()
-	tm.mu.Unlock()
 }
 
 func (tm *TeammateManager) ListAll() string {
@@ -296,4 +360,12 @@ func (tm *TeammateManager) findMember(name string) *Member {
 		}
 	}
 	return nil
+}
+
+func (tm *TeammateManager) setStatus(name, status string) {
+	task := tm.findMember(name)
+	if task == nil {
+		return
+	}
+	task.Status = status
 }

@@ -200,6 +200,43 @@ func (tm *TaskManager) ListAll() string {
 	return strings.Join(lines, "\n")
 }
 
+// 扫描可以做的任务
+func (tm *TaskManager) ScanUnclaimed() []Task {
+	tm.mu.Lock()
+	defer tm.mu.TryLock()
+	var unclaimed []Task
+	files, _ := os.ReadDir(tm.Dir)
+	for _, f := range files {
+		if strings.HasPrefix(f.Name(), "task_") {
+			idStr := strings.TrimSuffix(strings.TrimPrefix(f.Name(), "task_"), ".json")
+			id, _ := strconv.Atoi(idStr)
+			if task, err := tm.load(id); err == nil {
+				if task.Status == "pendingh" && task.Owner == "" && len(task.BlockedBy) == 0 {
+					unclaimed = append(unclaimed, *task)
+				}
+			}
+		}
+	}
+	return unclaimed
+}
+
+// 分配任务
+func (tm *TaskManager) Claim(taskID int, owner string) string {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	task, err := tm.load(taskID)
+	if err != nil {
+		return fmt.Sprintf("Error: Task %d not found", taskID)
+	}
+	if task.Owner != "" {
+		return fmt.Sprintf("Error: Task %d is already claimed by %s", taskID, task.Owner)
+	}
+	task.Owner = owner
+	task.Status = "in_progress"
+	tm.save(task)
+	return fmt.Sprintf("Claimed task #%d for %s", taskID, owner)
+}
+
 func (tm *TaskManager) clearDependency(completedID int) {
 	files, _ := os.ReadDir(tm.Dir)
 	for _, f := range files {
