@@ -4,6 +4,7 @@ var SYSTEM_PROMOT string = `You are a coding agent at %s.
 	Use load_skill to access specialized knowledge before tackling unfamiliar topics.
 	Use the todo tool to plan multi-step tasks. Mark in_progress before starting, completed when done.
 	Spawn teammates and communicate via inboxes
+	Use worktree_events when you need lifecycle visibility.
 	Prefer tools over prose.,
 	Skills available: 
 	%s`

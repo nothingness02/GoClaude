@@ -17,18 +17,32 @@ import (
 	"github.com/sashabaranov/go-openai/jsonschema"
 )
 
-//todos:
-//1.添加工具的动态注册
-//2.添加skill的动态卸载和注册
-//3.消化MCP服务
+// todos:
+// 1.添加工具的动态注册
+// 2.添加skill的动态卸载和注册
+// 3.消化MCP服务
+// 4.强化safepath的约束
+
+func isRelativePath(target, base string) bool {
+	rel, err := filepath.Rel(base, target)
+	if err != nil {
+		return false
+	}
+	// 如果相对路径以 ".." 开头，说明跳出了 base 目录
+	return !strings.HasPrefix(rel, "..")
+}
 
 func safePath(p string) (string, error) {
-	target := filepath.Join(common.WorkDir, p)
-	target = filepath.Clean(target)
-	if !strings.HasPrefix(target, common.WorkDir) {
+	joined := filepath.Join(common.WorkDir, p)
+	resolved, err := filepath.EvalSymlinks(joined)
+	if err != nil {
+		// 如果文件不存在，使用 Clean 后的路径继续检查
+		resolved = filepath.Clean(joined)
+	}
+	if !isRelativePath(resolved, common.WorkDir) {
 		return "", fmt.Errorf("path escapes workspace: %s", p)
 	}
-	return target, nil
+	return resolved, nil
 }
 
 func runBash(command string) string {
