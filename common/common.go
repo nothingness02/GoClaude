@@ -1,18 +1,15 @@
 package common
 
 import (
-	"fmt"
 	"os"
-	"path/filepath"
 
-	"github.com/joho/godotenv"
-	"github.com/sashabaranov/go-openai"
+	"github.com/GoClaude/client"
+	"github.com/GoClaude/config"
 )
 
 var (
 	WorkDir        string
 	SkillsDir      string
-	Client         *openai.Client
 	ModelID        string
 	TRANSCRIPT_DIR string
 	TASKS_DIR      string
@@ -22,28 +19,25 @@ var (
 	INBOX_DIR      string
 )
 
+// todo: 将common优化掉
+// Client 导出 config.Client（使用接口类型）
+var Client client.ClientInterface
+
 func init() {
-	_ = godotenv.Load("../.env") // 加载 .env 文件
-	apiKey := os.Getenv("OPENAI_API_KEY")
-	if apiKey == "" {
-		fmt.Println("Warning: OPENAI_API_KEY is not set")
-	}
-	baseURL := os.Getenv("OPENAI_BASE_URL")
-	config := openai.DefaultConfig(apiKey)
-	if baseURL != "" {
-		config.BaseURL = baseURL
-	}
-	Client = openai.NewClientWithConfig(config)
-	ModelID = os.Getenv("OPENAI_MODEL_ID")
-	if ModelID == "" {
-		ModelID = openai.GPT4o
-	}
-	WorkDir, _ = os.Getwd()
-	SkillsDir = filepath.Join(WorkDir, "skills")
-	TRANSCRIPT_DIR = filepath.Join(WorkDir, "transcripts")
-	TASKS_DIR = filepath.Join(WorkDir, "tasks")
-	TEAM_DIR = filepath.Join(WorkDir, "team")
-	INBOX_DIR = filepath.Join(TEAM_DIR, "inbox")
-	Keep_RECENT = 3
-	THRESHOLD = 80000
+	workDir, _ := os.Getwd()
+	_ = config.Init(workDir)
+
+	cfg := config.GetConfig()
+	WorkDir = cfg.WorkDir
+	SkillsDir = cfg.SkillsDir
+	ModelID = cfg.ModelID
+	TRANSCRIPT_DIR = cfg.TranscriptDir
+	TASKS_DIR = cfg.TasksDir
+	Keep_RECENT = cfg.KeepRecent
+	THRESHOLD = cfg.Threshold
+	TEAM_DIR = cfg.TeamDir
+	INBOX_DIR = cfg.InboxDir
+
+	// 直接使用 config.Client
+	Client = client.Client
 }

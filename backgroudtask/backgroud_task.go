@@ -1,4 +1,4 @@
-package tools
+package backgroudtask
 
 import (
 	"context"
@@ -8,9 +8,9 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/GoClaude/common"
 )
+
+// ============ BackgroundManager 后台任务管理 ============
 
 // BgTask 记录后台任务的详细状态
 type BgTask struct {
@@ -26,22 +26,29 @@ type Notification struct {
 	Command string `json:"command"`
 	Result  string `json:"result"`
 }
+
+// BackgroundManager 后台任务管理器
 type BackgroundManager struct {
-	tasks map[string]*BgTask
-	queue []Notification
-	mu    sync.Mutex
+	WorkDir string
+	Tasks   map[string]*BgTask
+	Queue   []Notification
+	mu      sync.Mutex
 }
 
-func NewBackgroundManager() *BackgroundManager {
+// NewBackgroundManager 创建后台任务管理器
+func NewBackgroundManager(workDir string) *BackgroundManager {
 	return &BackgroundManager{
-		tasks: make(map[string]*BgTask),
-		queue: make([]Notification, 0),
+		WorkDir: workDir,
+		Tasks:   make(map[string]*BgTask),
+		Queue:   make([]Notification, 0),
 	}
 }
+
+// Run 启动后台任务
 func (bg *BackgroundManager) Run(command string) string {
-	taskID := shortID()
+	taskID := ShortID()
 	bg.mu.Lock()
-	bg.tasks[taskID] = &BgTask{
+	bg.Tasks[taskID] = &BgTask{
 		Status:  "running",
 		Command: command,
 	}
@@ -49,11 +56,12 @@ func (bg *BackgroundManager) Run(command string) string {
 	go bg.execute(taskID, command)
 	return fmt.Sprintf("Background task %s started: %s", taskID, truncate(command, 80))
 }
+
 func (bg *BackgroundManager) execute(taskID string, command string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "bash", "-c", command)
-	cmd.Dir = common.WorkDir
+	cmd.Dir = bg.WorkDir
 	out, err := cmd.CombinedOutput()
 	status := "completed"
 	output := strings.TrimSpace(string(out))
@@ -64,29 +72,30 @@ func (bg *BackgroundManager) execute(taskID string, command string) {
 		status = "error"
 		output = fmt.Sprintf("Error: %v", err)
 	}
-	if len(output) > common.THRESHOLD {
-		output = output[:common.THRESHOLD]
+	if len(output) > 80000 {
+		output = output[:80000]
 	}
 	if output == "" {
 		output = "(no output)"
 	}
 	bg.mu.Lock()
 	defer bg.mu.Unlock()
-	bg.tasks[taskID].Status = status
-	bg.tasks[taskID].Result = output
-	bg.queue = append(bg.queue, Notification{
+	bg.Tasks[taskID].Status = status
+	bg.Tasks[taskID].Result = output
+	bg.Queue = append(bg.Queue, Notification{
 		TaskID:  taskID,
 		Status:  status,
 		Command: truncate(command, 80),
-		Result:  truncate(output, 500), // 给 LLM 的通知只需 500 字符的预览
+		Result:  truncate(output, 500),
 	})
 }
 
+// Check 检查任务状态
 func (bg *BackgroundManager) Check(taskID string) string {
 	bg.mu.Lock()
 	defer bg.mu.Unlock()
 	if taskID != "" {
-		t, exists := bg.tasks[taskID]
+		t, exists := bg.Tasks[taskID]
 		if !exists {
 			return fmt.Sprintf("Error: Unknown task %s", taskID)
 		}
@@ -96,38 +105,37 @@ func (bg *BackgroundManager) Check(taskID string) string {
 		}
 		return fmt.Sprintf("[%s] %s\n%s", t.Status, truncate(t.Command, 60), res)
 	}
-	if len(bg.tasks) == 0 {
+	if len(bg.Tasks) == 0 {
 		return "No background tasks."
 	}
 	var lines []string
-	for tid, t := range bg.tasks {
+	for tid, t := range bg.Tasks {
 		lines = append(lines, fmt.Sprintf("%s: [%s] %s", tid, t.Status, truncate(t.Command, 60)))
 	}
 	return strings.Join(lines, "\n")
 }
 
+// DrainNotifications 取出并清空通知队列
 func (bg *BackgroundManager) DrainNotifications() []Notification {
 	bg.mu.Lock()
 	defer bg.mu.Unlock()
-	if len(bg.queue) == 0 {
+	if len(bg.Queue) == 0 {
 		return nil
 	}
-	notifs := make([]Notification, len(bg.queue))
-	copy(notifs, bg.queue)
-	bg.queue = nil
+	notifs := make([]Notification, len(bg.Queue))
+	copy(notifs, bg.Queue)
+	bg.Queue = nil
 	return notifs
 }
 
-//------------功能函数-------------
-
-// 生成 8 位的短 UUID (Hex)
-func shortID() string {
+// ShortID 生成 8 位短 ID
+func ShortID() string {
 	b := make([]byte, 4)
 	rand.Read(b)
 	return fmt.Sprintf("%x", b)
 }
 
-// 阶段过长的输出
+// truncate 截断过长的输出
 func truncate(s string, max int) string {
 	if len(s) > max {
 		return s[:max] + "..."

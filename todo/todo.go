@@ -1,4 +1,4 @@
-package tools
+package todo
 
 import (
 	"fmt"
@@ -10,6 +10,7 @@ type TodoItem struct {
 	Text   string `json:"text"`
 	Status string `json:"status"`
 }
+
 type TodoManager struct {
 	items []TodoItem
 }
@@ -19,6 +20,7 @@ func NewTodoManager() *TodoManager {
 		items: []TodoItem{},
 	}
 }
+
 func (todo *TodoManager) Update(items []TodoItem) (string, error) {
 	if len(items) > 20 {
 		return "", fmt.Errorf("Max 20 todos allowed")
